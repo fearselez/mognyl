@@ -12,6 +12,7 @@ Env vars (задаються в Railway Dashboard):
 
 import asyncio
 import base64
+import gzip
 import json
 import os
 import random
@@ -45,7 +46,8 @@ def restore_session():
         sys.exit(1)
 
     session_path = f"{SESSION_FILE}.session"
-    data = base64.b64decode(SESSION_BASE64)
+    compressed = base64.b64decode(SESSION_BASE64)
+    data = gzip.decompress(compressed)
     with open(session_path, "wb") as f:
         f.write(data)
     log(f"Session file restored ({len(data)} bytes)")
