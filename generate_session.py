@@ -1,79 +1,73 @@
 """
-Генератор StringSession для Telethon.
-
-Запускати ЛОКАЛЬНО один раз, щоб конвертувати файлову сесію
-в рядок StringSession для використання на Railway.
-
-Використання:
-    python generate_session.py
-
-Після запуску:
-    1. Скопіюй рядок StringSession з консолі
-    2. Додай його як змінну SESSION_STRING в Railway Dashboard
+Генерує МІНІМАЛЬНИЙ .session файл (тільки auth data),
+кодує в base64 для Railway. Зберігає у файл session_base64.txt.
 """
 
-import asyncio
+import base64
+import sqlite3
 import os
 import sys
-from telethon import TelegramClient
-from telethon.sessions import StringSession
-from dotenv import load_dotenv
 
-# Fix Windows console encoding for emoji
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
-load_dotenv()
+SOURCE = "sender_session.session"
 
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
+if not os.path.exists(SOURCE):
+    print(f"Файл {SOURCE} не знайдено!")
+    sys.exit(1)
 
+src = sqlite3.connect(SOURCE)
 
-async def main():
-    # Підключаємось через існуючу файлову сесію
-    file_client = TelegramClient('sender_session', API_ID, API_HASH)
-    await file_client.connect()
+# Створюємо мінімальний файл — тільки sessions + version (без entities/sent_files кешу)
+mini_path = "sender_session_mini.session"
+if os.path.exists(mini_path):
+    os.remove(mini_path)
 
-    if not await file_client.is_user_authorized():
-        print("❌ Файлова сесія не авторизована!")
-        print("   Спочатку запусти main.py і авторизуйся через GUI.")
-        await file_client.disconnect()
-        return
+dst = sqlite3.connect(mini_path)
 
-    # Отримуємо auth key з файлової сесії
-    auth_key = file_client.session.auth_key
+# Копіюємо тільки необхідні таблиці
+essential_tables = ['version', 'sessions']
 
-    # Створюємо StringSession з тим самим auth key
-    string_session = StringSession()
-    string_session.set_dc(
-        file_client.session.dc_id,
-        file_client.session.server_address,
-        file_client.session.port
-    )
-    string_session.auth_key = auth_key
+for table_name in essential_tables:
+    create_sql = src.execute(f"SELECT sql FROM sqlite_master WHERE name='{table_name}'").fetchone()
+    if create_sql:
+        dst.execute(create_sql[0])
+        rows = src.execute(f"SELECT * FROM {table_name}").fetchall()
+        if rows:
+            placeholders = ','.join(['?' for _ in rows[0]])
+            dst.executemany(f"INSERT INTO {table_name} VALUES ({placeholders})", rows)
 
-    session_string = string_session.save()
+# Створюємо порожні таблиці для entities та інших (Telethon очікує їх)
+other_tables = ['entities', 'sent_files', 'update_state']
+for table_name in other_tables:
+    create_sql = src.execute(f"SELECT sql FROM sqlite_master WHERE name='{table_name}'").fetchone()
+    if create_sql:
+        dst.execute(create_sql[0])  # Тільки структура, без даних
 
-    # Перевіряємо що StringSession працює
-    print("\n🔄 Перевірка StringSession...")
-    test_client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
-    await test_client.connect()
+dst.commit()
+dst.execute("VACUUM")
+dst.commit()
+dst.close()
+src.close()
 
-    if await test_client.is_user_authorized():
-        me = await test_client.get_me()
-        print(f"✅ StringSession працює! Авторизований як: {me.first_name} ({me.phone})")
-        print("\n" + "=" * 60)
-        print("🔑 Твоя StringSession (скопіюй весь рядок нижче):")
-        print("=" * 60)
-        print(session_string)
-        print("=" * 60)
-        print("\n⚠️  УВАГА: Цей рядок дає повний доступ до акаунту!")
-        print("   Нікому не показуй його. Додай як SESSION_STRING в Railway.")
-    else:
-        print("❌ StringSession не працює. Спробуй видалити sender_session.session і авторизуватись заново.")
+mini_size = os.path.getsize(mini_path)
+orig_size = os.path.getsize(SOURCE)
+print(f"Оригінальний розмір: {orig_size:,} bytes")
+print(f"Мінімальний розмір:  {mini_size:,} bytes")
 
-    await test_client.disconnect()
-    await file_client.disconnect()
+# Кодуємо в base64
+with open(mini_path, "rb") as f:
+    data = f.read()
 
+encoded = base64.b64encode(data).decode("ascii")
 
-if __name__ == "__main__":
-    asyncio.run(main())
+# Зберігаємо у файл
+with open("session_base64.txt", "w") as f:
+    f.write(encoded)
+
+print(f"Base64 розмір:       {len(encoded):,} символів")
+print(f"\nЗбережено у файл: session_base64.txt")
+print("Скопіюй вміст цього файлу як SESSION_BASE64 в Railway Variables.")
+
+# Прибираємо тимчасовий файл
+os.remove(mini_path)

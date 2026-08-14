@@ -1,16 +1,17 @@
 """
 Headless Telegram Sender для Railway.
 
-Працює без GUI — читає config.json, підключається через StringSession,
+Працює без GUI — читає config.json, підключається через сесію з base64,
 запускає розсилку в нескінченному циклі.
 
 Env vars (задаються в Railway Dashboard):
     API_ID          — Telegram API ID
     API_HASH        — Telegram API Hash
-    SESSION_STRING  — StringSession рядок (з generate_session.py)
+    SESSION_BASE64  — Base64 рядок файлу сесії (з generate_session.py)
 """
 
 import asyncio
+import base64
 import json
 import os
 import random
@@ -19,14 +20,15 @@ import signal
 from datetime import datetime
 
 from telethon import TelegramClient
-from telethon.sessions import StringSession
 from dotenv import load_dotenv
 
 load_dotenv()
 
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
-SESSION_STRING = os.getenv("SESSION_STRING")
+SESSION_BASE64 = os.getenv("SESSION_BASE64")
+
+SESSION_FILE = "sender_session"
 
 
 def log(text: str):
@@ -35,10 +37,24 @@ def log(text: str):
     print(f"[{timestamp}] {text}", flush=True)
 
 
+def restore_session():
+    """Відновити .session файл з base64 env var."""
+    if not SESSION_BASE64:
+        log("SESSION_BASE64 не задано!")
+        log("   Запусти generate_session.py локально і додай результат в Railway Variables.")
+        sys.exit(1)
+
+    session_path = f"{SESSION_FILE}.session"
+    data = base64.b64decode(SESSION_BASE64)
+    with open(session_path, "wb") as f:
+        f.write(data)
+    log(f"Session file restored ({len(data)} bytes)")
+
+
 def load_config(path: str = "config.json") -> list:
     """Завантажити цілі розсилки з config.json."""
     if not os.path.exists(path):
-        log(f"❌ Файл {path} не знайдено!")
+        log(f"Файл {path} не знайдено!")
         sys.exit(1)
 
     with open(path, "r", encoding="utf-8") as f:
@@ -46,7 +62,7 @@ def load_config(path: str = "config.json") -> list:
 
     targets = data.get("targets", [])
     if not targets:
-        log("❌ config.json порожній — немає груп для розсилки!")
+        log("config.json порожній — немає груп для розсилки!")
         sys.exit(1)
 
     return targets
@@ -72,13 +88,13 @@ async def group_sender_loop(client: TelegramClient, target_data: dict, send_lock
         async with send_lock:
             if stop_event.is_set():
                 break
-            log(f"🔄 Відправка в {group_str}...")
+            log(f"Sending to {group_str}...")
             try:
                 entity = await client.get_entity(target)
                 await client.send_message(entity, message)
-                log(f"✅ Успішно відправлено в {group_str}")
+                log(f"OK - sent to {group_str}")
             except Exception as e:
-                log(f"❌ Помилка з {group_str}: {str(e)}")
+                log(f"ERROR {group_str}: {str(e)}")
 
             # Мікро-пауза після кожної відправки
             await asyncio.sleep(1.5)
@@ -87,7 +103,7 @@ async def group_sender_loop(client: TelegramClient, target_data: dict, send_lock
             break
 
         delay = random.randint(delay_min, delay_max)
-        log(f"⏳ Очікування {delay} сек. для групи {group_str}...")
+        log(f"Waiting {delay}s for {group_str}...")
 
         # Пауза з кроком 1 сек для швидкого переривання
         for _ in range(delay):
@@ -97,17 +113,15 @@ async def group_sender_loop(client: TelegramClient, target_data: dict, send_lock
 
 
 async def main():
-    if not SESSION_STRING:
-        log("❌ SESSION_STRING не задано!")
-        log("   Запусти generate_session.py локально і додай результат в Railway Variables.")
-        sys.exit(1)
+    # Відновити session файл з base64
+    restore_session()
 
-    # Підключення через StringSession
-    client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+    # Підключення через файлову сесію
+    client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
     await client.connect()
 
     if not await client.is_user_authorized():
-        log("❌ Сесія невалідна! Згенеруй нову через generate_session.py")
+        log("Session invalid! Re-generate via generate_session.py")
         sys.exit(1)
 
     me = await client.get_me()
